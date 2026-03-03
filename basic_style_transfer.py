@@ -6,17 +6,35 @@ from torchvision.models import VGG19_Weights
 from PIL import Image 
 import io
 
+import warnings
+# Отключаем предупреждения от torchvision
+warnings.filterwarnings("ignore", category=UserWarning, module="torchvision.models._utils")
+
+# Проверка GPU
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+    print(f"✅ Используется GPU: {torch.cuda.get_device_name(0)}")
+else:
+    device = torch.device("cpu")
+    print("⚠️ GPU недоступен, используется CPU")
+
+def tv_loss(img):
+    """Total Variation Loss для сглаживания результата"""
+    h_tv = torch.pow(img[:,:,1:,:] - img[:,:,:-1,:], 2).sum()
+    w_tv = torch.pow(img[:,:,:,1:] - img[:,:,:,:-1], 2).sum()
+    return (h_tv + w_tv) * 1e-6
+
 # Устройство 
 device = torch.device("cpu") # пока без GPU
 
-def load_image(image_bytes, size = 256):
-    """Загружает изображение и преобразует в тензор"""
+def load_image(image_bytes, size=384): #рекомендуется 256 или 384 для слабых/средних систем
     image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
     transform = transforms.Compose([
         transforms.Resize((size, size)),
         transforms.ToTensor()
     ])
-    return transform(image).unsqueeze(0).to(device)
+    tensor = transform(image).unsqueeze(0).to(device)  
+    return tensor
 
 def gram_matrix(input):
     """Вычисляет Gram-матрицу для style loss"""
@@ -78,73 +96,84 @@ def get_model_and_losses(cnn, content_img, style_img):
 
     return model
 
-def run_style_transfer(content_bytes, style_bytes, num_steps=200):
+def run_style_transfer(content_bytes, style_bytes, num_steps=150):
     """Основная функция переноса стиля"""
+    
+    try: 
+        # Загрузка изображений (оба одинакового размера для обучения)
+        content_img = load_image(content_bytes, size=384)
+        style_img = load_image(style_bytes, size=384)
+        
+        # Сохраняем оригинальный размер content для финального результата
+        original_content = Image.open(io.BytesIO(content_bytes)).convert('RGB')
+        original_size = original_content.size  # (width, height)
+    
+        # Загрузка VGG19 (загрузка модели на GPU)
+        weights = VGG19_Weights.IMAGENET1K_V1
+        cnn = models.vgg19(weights=weights).to(device).eval()  
 
-    # Загрузка изображений 
-    content_img = load_image(content_bytes, size=384)
-    style_img = load_image(style_bytes, size=384)
+        # Модель с потерями 
+        model = get_model_and_losses(cnn, content_img, style_img)
+        model.requires_grad_(False)
 
-    # Загрузка VGG19
-    weights = VGG19_Weights.IMAGENET1K_V1
-    cnn = models.vgg19(weights=weights).to(device).eval()
+        # Начальное изображение на GPU
+        input_img = content_img.clone().requires_grad_(True).to(device)
 
-    # Модель с потерями 
-    model = get_model_and_losses(cnn, content_img, style_img)
-    model.requires_grad_(False)
+        # Оптимизатор
+        optimizer = torch.optim.Adam([input_img], lr=0.01)
 
-    # Начальное изображение = content 
-    input_img = content_img.clone().requires_grad_(True)
-
-    # Оптимизатор
-    optimizer = torch.optim.LBFGS([input_img])
-
-    step = [0]
-    while step[0] <= num_steps:
-        def closure():
+        step = [0]
+        while step[0] <= num_steps:
             optimizer.zero_grad()
-
-            # Обрезаем значения до [0,1]
+            
             with torch.no_grad():
                 input_img.clamp_(0, 1)
-
+            
             model(input_img)
-
+            
             style_score = 0
             content_score = 0
-
+            
             for name, layer in model.named_children():
                 if isinstance(layer, ContentLoss):
                     content_score += layer.loss 
                 if isinstance(layer, StyleLoss):
                     style_score += layer.loss
-
-            # Веса потерь 
+            
             style_score *= 10000  
             content_score *= 1
-
-            loss = style_score + content_score
+            tv_score = tv_loss(input_img)
+            
+            loss = style_score + content_score + tv_score
             loss.backward()
-
+            
+            optimizer.step()  # ← Без closure!
+            
             step[0] += 1
-            return loss
-        
-        optimizer.step(closure)
+            
+            if step[0] % 50 == 0:
+                print(f"Step {step[0]}, Loss: {loss.item():.4f}")
 
-    # Финальный результат 
-    with torch.no_grad():
-        input_img.clamp_(0, 1)
+        # Финальный результат, перенос обратно на CPU для сохранения
+        with torch.no_grad():
+            result_tensor = input_img.clamp(0, 1).cpu().squeeze(0)  
+            pil_image = transforms.ToPILImage()(result_tensor)
+            # Масштабируем до оригинального размера
+            pil_image = pil_image.resize(original_size, Image.Resampling.LANCZOS)
+            return pil_image
 
-    return input_img
+    except RuntimeError as e:
+        if "out of memory" in str(e):
+            raise Exception("Недостаточно памяти. Попробуйте уменьшить размер изображения.")
+        else:
+            raise e
 
 def process_image(content_bytes, style_bytes):
     """Функция для интеграции в сервис"""  
-    output = run_style_transfer(content_bytes, style_bytes, num_steps=200)  
+    output_pil = run_style_transfer(content_bytes, style_bytes, num_steps=150)  
 
     # Конвертация обратно в байты
-    output_image = output.cpu().squeeze(0)
-    output_pil = transforms.ToPILImage()(output_image)
-
     output_bytes = io.BytesIO()
     output_pil.save(output_bytes, format='JPEG') 
-    return output_bytes.getvalue()            
+    output_bytes.seek(0)
+    return output_bytes.getvalue()
