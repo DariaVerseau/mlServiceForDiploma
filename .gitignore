@@ -13,6 +13,10 @@ results/
 *.jpg
 *.png
 
+test_photo_originals/
+*.jpg
+*.png
+
 # IDE
 .vscode/
 .idea/

@@ -18,7 +18,7 @@ networkx==3.6.1
 numpy==1.26.4
 opencv-python==4.8.1.78
 packaging==26.0
-pillow==12.1.0
+Pillow==10.3.0
 pydantic==2.12.5
 pydantic_core==2.41.5
 python-multipart==0.0.6
