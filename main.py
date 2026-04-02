@@ -1,8 +1,10 @@
+import io
 from pathlib import Path
 
 import cv2
 from fastapi import FastAPI, File, HTTPException, UploadFile, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 import numpy as np
 import uvicorn
 import os
@@ -14,6 +16,7 @@ from PIL import Image, ImageEnhance
 from basic_style_transfer import process_image #пока использую базовый перенос стиля 
 from processors.super_resolution import upscale_image
 from processors.postprocess import enhance_photo_pil_cv2
+#from adain_transfer import process_adain
 
 import uuid
 import sys
@@ -46,14 +49,14 @@ async def process_style_transfer(
     style: str = Form(
         "vangogh",
         description="Художественный стиль для применения",
-        pattern="^(vangogh|picasso|monet|monet2|erinHanson)$"
+        pattern="^(vangogh|picasso|monet|monet2|erinHanson|sketch)$"
     )
 ):
     # Создаём папку results если не существует
     os.makedirs("results", exist_ok=True)
     
     # Проверка поддерживаемых стилей
-    supported_styles = ["vangogh", "picasso", "monet", "monet2", "erinHanson"]
+    supported_styles = ["vangogh", "picasso", "monet", "monet2", "erinHanson", "sketch"]
     if style not in supported_styles:
         raise HTTPException(
             status_code=400, 
@@ -86,6 +89,245 @@ async def process_style_transfer(
         f.write(result_bytes)
     
     return {"result_url": f"/results/{result_filename}", "style": style}
+
+# Пути
+BASE_DIR = Path(__file__).parent
+ADAIN_DIR = BASE_DIR / "pytorch-AdaIN"
+ADAIN_SCRIPT = ADAIN_DIR / "test.py"
+STYLE_DIR = ADAIN_DIR / "input" / "style"
+MODELS_DIR = ADAIN_DIR / "models"
+RESULTS_DIR = BASE_DIR / "results"
+TEMP_DIR = BASE_DIR / "temp_content"
+
+# Создаём папки
+TEMP_DIR.mkdir(exist_ok=True)
+RESULTS_DIR.mkdir(exist_ok=True)
+
+# Монтируем папку с результатами
+app.mount("/results", StaticFiles(directory=str(RESULTS_DIR)), name="results")
+
+# Пути к весам
+decoder_weights = MODELS_DIR / "decoder.pth"
+vgg_weights = MODELS_DIR / "vgg_normalised.pth"
+
+
+@app.post(
+    "/style_transfer_adain",
+    summary="Применить художественный стиль к изображению",
+    description="Использует AdaIN из официального репозитория pytorch-AdaIN",
+    response_description="URL для скачивания результата"
+)
+async def style_transfer_adain(
+    image: UploadFile = File(..., description="Изображение для стилизации"),
+    style: str = Form("vangogh", description="Название художественного стиля"),
+    alpha: float = Form(1.0, ge=0.0, le=1.0, description="Сила стилизации"),
+    preserve_color: bool = Form(False, description="Сохранять цвет оригинала")
+):
+    """Перенос художественного стиля через вызов test.py из репозитория"""
+    
+    # === 1. Валидация стиля ===
+    supported_styles = [
+        "vangogh", "picasso", "monet", "monet2", "erinHanson",
+        "antimonocromatismo", "asheville", "brushstrokes", "contrast_of_forms",
+        "en_campo_gris", "goeritz", "impronte_d_artista", "la_muse",
+        "mondrian_cropped", "picasso_seated_nude_hr", "picasso_self_portrait",
+        "scene_de_rue", "sketch", "the_resevoir_at_poitiers", "trial",
+        "woman_in_peasant_dress_cropped", "woman_in_peasant_dress",
+        "woman_with_hat_matisse"
+    ]
+    
+    if style not in supported_styles:
+        raise HTTPException(400, f"Style '{style}' not supported")
+    
+    # === 2. Проверяем наличие файла стиля ===
+    style_path = STYLE_DIR / f"{style}.jpg"
+    if not style_path.exists():
+        style_path = STYLE_DIR / f"{style}.png"
+        if not style_path.exists():
+            raise HTTPException(404, f"Style image '{style}' not found")
+    
+    # === 3. Проверяем наличие весов ===
+    if not decoder_weights.exists():
+        raise HTTPException(500, f"Decoder weights not found at {decoder_weights}")
+    if not vgg_weights.exists():
+        raise HTTPException(500, f"VGG weights not found at {vgg_weights}")
+    
+    # === 4. Сохраняем загруженное изображение ===
+    content_bytes = await image.read()
+    if len(content_bytes) == 0:
+        raise HTTPException(400, "Empty image file")
+    
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False, dir=TEMP_DIR) as tmp:
+        tmp.write(content_bytes)
+        content_path = tmp.name
+    
+    # === 5. Временный файл для результата (с именем, которое создаст test.py) ===
+    # test.py создаёт файлы вида: {content_name}_stylized_{style_name}.jpg
+    # Мы сохраним во временную папку, а потом переименуем
+    temp_output_dir = TEMP_DIR / "adain_output"
+    temp_output_dir.mkdir(exist_ok=True)
+    
+    # === 6. Вызываем test.py ===
+    command = [
+        "python", str(ADAIN_SCRIPT),
+        "--content", content_path,
+        "--style", str(style_path),
+        "--output", str(temp_output_dir),  # Сохраняем во временную папку
+        "--alpha", str(alpha),
+        "--decoder", str(decoder_weights),
+        "--vgg", str(vgg_weights),
+    ]
+    
+    if preserve_color:
+        command.append("--preserve_color")
+    
+    print(f"Running: {' '.join(command)}")
+    
+    try:
+        # Запускаем процесс
+        result = subprocess.run(
+            command,
+            cwd=str(ADAIN_DIR),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False
+        )
+        
+        if result.returncode != 0:
+            print(f"STDERR: {result.stderr}")
+            raise RuntimeError(f"AdaIN failed: {result.stderr}")
+        
+        # === 7. Находим созданный файл ===
+        # test.py создаёт файл с именем: {basename}_stylized_{stylename}.jpg
+        content_basename = Path(content_path).stem
+        style_basename = style_path.stem
+        expected_filename = f"{content_basename}_stylized_{style_basename}.jpg"
+        temp_result_path = temp_output_dir / expected_filename
+        
+        # Если файл не найден, ищем любой jpg во временной папке
+        if not temp_result_path.exists():
+            jpg_files = list(temp_output_dir.glob("*.jpg"))
+            if jpg_files:
+                temp_result_path = jpg_files[0]
+            else:
+                raise RuntimeError("No output file found")
+        
+        print(f"Found temp result: {temp_result_path}")
+        
+        # === 8. Переименовываем в нужное имя ===
+        final_filename = f"adain_{style}_{uuid.uuid4().hex}.jpg"
+        final_path = RESULTS_DIR / final_filename
+        
+        shutil.move(str(temp_result_path), str(final_path))
+        print(f"Moved to: {final_path}")
+        
+    except subprocess.TimeoutExpired:
+        raise HTTPException(500, "Style transfer timeout (120 seconds)")
+    except Exception as e:
+        print(f"Error: {e}")
+        raise HTTPException(500, f"Style transfer failed: {str(e)}")
+    finally:
+        # Удаляем временные файлы
+        if os.path.exists(content_path):
+            os.unlink(content_path)
+        # Очищаем временную папку с результатами
+        if temp_output_dir.exists():
+            shutil.rmtree(temp_output_dir, ignore_errors=True)
+    
+    return {
+        "result_url": f"/results/{final_filename}",
+        "style": style,
+        "alpha": alpha,
+        "preserve_color": preserve_color,
+        "method": "AdaIN (official repo)",
+        "status": "success"
+    }
+
+"""@app.post(
+    "/style_transfer_telestyle",
+    summary="TeleStyle перенос стиля (SOTA 2026)",
+    response_description="URL для скачивания результата"
+)
+async def style_transfer_telestyle(
+    image: UploadFile = File(..., description="Исходное изображение в формате JPEG или PNG"),
+    style: str = Form("vangogh", description="Художественный стиль для применения"),
+    num_steps: int = Form(4, description="Количество шагов диффузии (1-10)", ge=1, le=10)
+):
+    # Валидация
+    supported_styles = ["vangogh", "picasso", "monet", "monet2", "erinHanson"]
+    if style not in supported_styles:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Style '{style}' not supported. Available: {', '.join(supported_styles)}"
+        )
+    
+    ext = os.path.splitext(image.filename)[1].lower()
+    if ext not in [".jpg", ".jpeg", ".png", ".bmp"]:
+        raise HTTPException(status_code=400, detail="Only JPG/PNG/BMP supported")
+
+    input_name = f"upload_{uuid.uuid4().hex}{ext}"
+    final_result_path = None
+
+    with open(input_name, "wb") as f:
+        f.write(await image.read())
+
+    try:
+        print(f"=== TELESTYLE TRANSFER START ===")
+        print(f"Input file: {input_name}")
+        print(f"Style: {style}")
+        print(f"Steps: {num_steps}")
+        
+        # Импорты
+        from telestyle_transfer import process_telestyle
+        
+        # Загрузка контентного изображения
+        with open(input_name, "rb") as f:
+            content_bytes = f.read()
+        
+        # Загрузка стилевого изображения
+        style_path = f"styles/{style}.jpg"
+        if not os.path.exists(style_path):
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Style image '{style}.jpg' not found in styles/ folder"
+            )
+        
+        with open(style_path, "rb") as f:
+            style_bytes = f.read()
+        
+        # Применение стиля через TeleStyle
+        print("Applying TeleStyle transfer...")
+        result_bytes = process_telestyle(content_bytes, style_bytes, num_steps)
+        
+        # Сохранение результата
+        final_result_path = f"results/style_telestyle_{style}_{uuid.uuid4().hex}.jpg"
+        with open(final_result_path, "wb") as f:
+            f.write(result_bytes)
+        
+        print(f"✓ TeleStyle transfer successful! Saved to: {final_result_path}")
+        print(f"=== TELESTYLE TRANSFER END ===")
+        
+        return {
+            "result_url": f"/results/{os.path.basename(final_result_path)}",
+            "style": style,
+            "num_steps": num_steps
+        }
+
+    except Exception as e:
+        print(f"✗ Error applying style: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Style transfer failed: {str(e)}")
+    
+    finally:
+        # Очистка временных файлов
+        if os.path.exists(input_name):
+            try:
+                os.unlink(input_name)
+            except:
+                pass
+"""
 
 @app.get("/results/{filename}")
 async def get_result(filename: str):
@@ -386,7 +628,7 @@ async def postprocess_image(
 @app.post(
     "/colorize",
     summary="Раскраска старых фотографий",
-    description="Преобразует чёрно-белые изображения в цветные с помощью PyTorch-модели",
+    description="Преобразует чёрно-белые изображения в цветные с правильной обработкой для старых фото",
     response_description="URL для скачивания раскрашенного изображения"
 )
 async def colorize_image(image: UploadFile = File(...)):
@@ -407,7 +649,6 @@ async def colorize_image(image: UploadFile = File(...)):
         # Импорты
         import sys
         sys.path.append('./colorization')
-        
         from colorizers import siggraph17
         import torch
         import torch.nn.functional as F
@@ -416,57 +657,55 @@ async def colorize_image(image: UploadFile = File(...)):
         import cv2
         
         # Загружаем модель
-        print("Loading siggraph17 model...")
         colorizer = siggraph17(pretrained=True).eval()
-        print("✓ Model loaded")
         
-        # Загружаем изображение
-        img = Image.open(input_name).convert('L').convert('RGB')
+        # Загружаем изображение и конвертируем в чистый грейскейл
+        img = Image.open(input_name).convert('L')
         
         # Предобработка для старых фото
         img_array = np.array(img)
-        img_gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
         
         # Улучшение контраста
-        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-        img_gray = clahe.apply(img_gray)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        img_array = clahe.apply(img_array)
         
         # Удаление шума
-        img_gray = cv2.fastNlMeansDenoising(img_gray, h=10)
+        img_array = cv2.fastNlMeansDenoising(img_array, h=12)
         
-        # Конвертация в RGB для дальнейшей обработки
-        img = Image.fromarray(cv2.cvtColor(img_gray, cv2.COLOR_GRAY2RGB))
+        # Конвертация в RGB для модели
+        img_rgb = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
         
         # Конвертация в Lab
-        img = np.array(img)
-        img_lab = cv2.cvtColor(img, cv2.COLOR_RGB2Lab)
-        img_l = img_lab[:, :, 0:1].astype(np.float32) / 100.0
+        img_lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2Lab)
+        img_l = img_lab[:, :, 0:1].astype(np.float32)
+        
+        # Нормализация L канала к [0, 100]
+        img_l_norm = img_l / 100.0
         
         # Подготовка для модели
-        img_l_rs = torch.from_numpy(img_l).permute(2, 0, 1).float().unsqueeze(0)
-        img_l_rs = F.interpolate(img_l_rs, size=(256, 256), mode='bilinear')
+        img_l_rs = torch.from_numpy(img_l_norm).permute(2, 0, 1).float().unsqueeze(0)
+        img_l_rs = F.interpolate(img_l_rs, size=(224, 224), mode='bilinear')
         
         # Цветизация
-        print("Colorizing...")
         with torch.no_grad():
             img_ab = colorizer(img_l_rs)
-            img_ab = F.interpolate(img_ab, size=(img.shape[0], img.shape[1]), mode='bilinear')
+            img_ab = F.interpolate(img_ab, size=(img_lab.shape[0], img_lab.shape[1]), mode='bilinear')
         
-        # Реконструкция
-        print("Reconstructing RGB...")
-        img_lab_out = np.zeros((img.shape[0], img.shape[1], 3))
-        img_lab_out[:, :, 0] = img_l[:, :, 0] * 100
-        img_lab_out[:, :, 1:] = img_ab[0].cpu().permute(1, 2, 0).numpy() * 110
-        img_rgb = cv2.cvtColor(np.uint8(img_lab_out), cv2.COLOR_Lab2RGB)
+        # Реконструкция с ПРАВИЛЬНЫМ масштабом
+        img_lab_out = np.zeros_like(img_lab)
+        img_lab_out[:, :, 0] = img_l[:, :, 0]
+        img_lab_out[:, :, 1:] = img_ab[0].cpu().permute(1, 2, 0).numpy() * 100.0  # КРИТИЧЕСКИ ВАЖНО: *100
+        
+        # Конвертация в RGB
+        img_rgb_out = cv2.cvtColor(np.uint8(img_lab_out), cv2.COLOR_Lab2RGB)
         
         # Смешивание с оригиналом для естественности
-        img_original = np.array(Image.open(input_name).convert('RGB'))
-        colorized = (img_rgb.astype("float32") * 0.8 + img_original.astype("float32") * 0.2)
-        colorized = np.clip(colorized, 0, 255).astype("uint8")
+        img_original_rgb = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
+        colorized = cv2.addWeighted(img_rgb_out, 0.7, img_original_rgb, 0.3, 0)
         
         # Сохранение
         final_result_path = f"results/colorized_{uuid.uuid4().hex}.jpg"
-        Image.fromarray(colorized).save(final_result_path, "JPEG", quality=90)
+        cv2.imwrite(final_result_path, cv2.cvtColor(colorized, cv2.COLOR_RGB2BGR))
         
         print(f"✓ Colorized successfully! Saved to: {final_result_path}")
         print("=== COLORIZE END ===")

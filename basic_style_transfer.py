@@ -96,13 +96,13 @@ def get_model_and_losses(cnn, content_img, style_img):
 
     return model
 
-def run_style_transfer(content_bytes, style_bytes, num_steps=150):
+def run_style_transfer(content_bytes, style_bytes, num_steps=300):
     """Основная функция переноса стиля"""
     
     try: 
         # Загрузка изображений (оба одинакового размера для обучения)
-        content_img = load_image(content_bytes, size=384)
-        style_img = load_image(style_bytes, size=384)
+        content_img = load_image(content_bytes, size=512) #максимум 512
+        style_img = load_image(style_bytes, size=512) #максимум 512
         
         # Сохраняем оригинальный размер content для финального результата
         original_content = Image.open(io.BytesIO(content_bytes)).convert('RGB')
@@ -140,9 +140,9 @@ def run_style_transfer(content_bytes, style_bytes, num_steps=150):
                 if isinstance(layer, StyleLoss):
                     style_score += layer.loss
             
-            style_score *= 10000  
-            content_score *= 1
-            tv_score = tv_loss(input_img)
+            style_score *= 100000 
+            content_score *= 0.5
+            tv_score = tv_loss(input_img) * 1e-4
             
             loss = style_score + content_score + tv_score
             loss.backward()

@@ -1,17 +1,28 @@
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
+*$py.class
+*.so
 .Python
-env/
 venv/
-.venv/
+env/
+ENV/
+.venv
 
-# FastAPI/ML
+# Исключаем клонированные репозитории
+pytorch-AdaIN/
+Real-ESRGAN/
+gfpgan/
+colorization/
+CodeFormer/
+
+# Результаты и временные файлы
 results/
-*.jpg
-*.png
+temp_content/
+temp_content_adain/
+*.log
+*.tmp
+*.temp
 
 test_photo_originals/
 *.jpg
@@ -20,7 +31,20 @@ test_photo_originals/
 # IDE
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+.DS_Store
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Uploads
+uploads/
+media/
+
+# Secrets
+.env
+.secrets
+config.local.*
