@@ -10,13 +10,12 @@ import uvicorn
 import os
 from PIL import Image, ImageEnhance
 
-#from wct2_processor import process_image --- более продвинутая модель, возможно заменю на нее позже
 #from processors.face_enhancement import enhance_faces первая модель, неплохая, но плохо справлятся с обработкой глаз, делает их не естественными  
 #from processors.codeformer_enhancement import enhance_faces_codeformer #улучшенная модель 
 from basic_style_transfer import process_image #пока использую базовый перенос стиля 
 from processors.super_resolution import upscale_image
 from processors.postprocess import enhance_photo_pil_cv2
-#from adain_transfer import process_adain
+
 
 import uuid
 import sys
@@ -25,10 +24,14 @@ import tempfile
 import shutil
 
 
-app = FastAPI(title="WCT2 Style Transfer Service")
+app = FastAPI(title="ml-service")
 
 # Создаём папку для результатов при запуске
 os.makedirs("results", exist_ok=True)
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "service": "ml-service"}
 
 @app.post(
     "/process",

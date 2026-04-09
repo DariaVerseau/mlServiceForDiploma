@@ -1,0 +1,64 @@
+# Git
+.git
+.gitignore
+.github/
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+.Python
+venv/
+env/
+.venv/
+.eggs/
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Результаты и временные данные (НЕ КОПИРУЕМ!)
+results/
+temp_content/
+inputs/
+uploads/
+output/
+*.jpg
+*.png
+*.jpeg
+*.mp4
+*.pth
+*.pt
+*.bin
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Логи
+*.log
+*.tmp
+
+# Docker
+Dockerfile*
+.dockerignore
+docker-compose*.yml
+
+# Документация
+README.md
+docs/
+*.md
+
+# Тесты
+tests/
+test_*.py
+*_test.py
+
+# Системные файлы
+.DS_Store
+Thumbs.db
