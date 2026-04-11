@@ -247,91 +247,6 @@ async def style_transfer_adain(
         "status": "success"
     }
 
-"""@app.post(
-    "/style_transfer_telestyle",
-    summary="TeleStyle перенос стиля (SOTA 2026)",
-    response_description="URL для скачивания результата"
-)
-async def style_transfer_telestyle(
-    image: UploadFile = File(..., description="Исходное изображение в формате JPEG или PNG"),
-    style: str = Form("vangogh", description="Художественный стиль для применения"),
-    num_steps: int = Form(4, description="Количество шагов диффузии (1-10)", ge=1, le=10)
-):
-    # Валидация
-    supported_styles = ["vangogh", "picasso", "monet", "monet2", "erinHanson"]
-    if style not in supported_styles:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Style '{style}' not supported. Available: {', '.join(supported_styles)}"
-        )
-    
-    ext = os.path.splitext(image.filename)[1].lower()
-    if ext not in [".jpg", ".jpeg", ".png", ".bmp"]:
-        raise HTTPException(status_code=400, detail="Only JPG/PNG/BMP supported")
-
-    input_name = f"upload_{uuid.uuid4().hex}{ext}"
-    final_result_path = None
-
-    with open(input_name, "wb") as f:
-        f.write(await image.read())
-
-    try:
-        print(f"=== TELESTYLE TRANSFER START ===")
-        print(f"Input file: {input_name}")
-        print(f"Style: {style}")
-        print(f"Steps: {num_steps}")
-        
-        # Импорты
-        from telestyle_transfer import process_telestyle
-        
-        # Загрузка контентного изображения
-        with open(input_name, "rb") as f:
-            content_bytes = f.read()
-        
-        # Загрузка стилевого изображения
-        style_path = f"styles/{style}.jpg"
-        if not os.path.exists(style_path):
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Style image '{style}.jpg' not found in styles/ folder"
-            )
-        
-        with open(style_path, "rb") as f:
-            style_bytes = f.read()
-        
-        # Применение стиля через TeleStyle
-        print("Applying TeleStyle transfer...")
-        result_bytes = process_telestyle(content_bytes, style_bytes, num_steps)
-        
-        # Сохранение результата
-        final_result_path = f"results/style_telestyle_{style}_{uuid.uuid4().hex}.jpg"
-        with open(final_result_path, "wb") as f:
-            f.write(result_bytes)
-        
-        print(f"✓ TeleStyle transfer successful! Saved to: {final_result_path}")
-        print(f"=== TELESTYLE TRANSFER END ===")
-        
-        return {
-            "result_url": f"/results/{os.path.basename(final_result_path)}",
-            "style": style,
-            "num_steps": num_steps
-        }
-
-    except Exception as e:
-        print(f"✗ Error applying style: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Style transfer failed: {str(e)}")
-    
-    finally:
-        # Очистка временных файлов
-        if os.path.exists(input_name):
-            try:
-                os.unlink(input_name)
-            except:
-                pass
-"""
-
 @app.get("/results/{filename}")
 async def get_result(filename: str):
     """Скачать результат по имени файла"""
@@ -505,13 +420,10 @@ async def enhance_image(
         }
 
     finally:
-        # Безопасное удаление временных файлов
-        for p in [input_name, final_result_path]:
-            if p and os.path.exists(p):
-                try:
-                    os.unlink(p)
-                except:
-                    pass
+        # Удаляем ТОЛЬКО входной временный файл
+        if input_name and os.path.exists(input_name):
+            os.unlink(input_name)
+    
 
 @app.post(
     "/postprocess",
