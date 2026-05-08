@@ -88,10 +88,8 @@ async def process_style_transfer(
     
     # Сохраняем результат
     result_filename = f"result_{uuid.uuid4().hex}.jpg"
-    with open(f"results/{result_filename}", "wb") as f:
-        f.write(result_bytes)
     
-    return {"result_url": f"/results/{result_filename}", "style": style}
+    return Response(content=result_bytes, media_type="image/jpeg")
 
 # Пути
 BASE_DIR = Path(__file__).parent
@@ -238,14 +236,11 @@ async def style_transfer_adain(
         if temp_output_dir.exists():
             shutil.rmtree(temp_output_dir, ignore_errors=True)
     
-    return {
-        "result_url": f"/results/{final_filename}",
-        "style": style,
-        "alpha": alpha,
-        "preserve_color": preserve_color,
-        "method": "AdaIN (official repo)",
-        "status": "success"
-    }
+   # После shutil.move(...):
+    with open(final_path, "rb") as f:
+        result_bytes = f.read()
+    os.unlink(final_path)  
+    return Response(content=result_bytes, media_type="image/jpeg")
 
 @app.get("/results/{filename}")
 async def get_result(filename: str):
@@ -255,11 +250,13 @@ async def get_result(filename: str):
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(file_path)
 
+from fastapi.responses import Response
+
 @app.post(
     "/upscale",
     summary="Повысить качество изображения",
     description="Повышает разрешение изображения в 2x или 4x раза с помощью Real-ESRGAN",
-    response_description="URL для скачивания улучшенного изображения"
+    response_description="Улучшенное изображение в формате JPEG"
 )
 async def upscale_endpoint(
     image: UploadFile = File(...),
@@ -277,13 +274,8 @@ async def upscale_endpoint(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Upscale failed: {str(e)}")
     
-    # Сохранение результата
-    os.makedirs("results", exist_ok=True)
-    result_filename = f"upscale_{uuid.uuid4().hex}.jpg"
-    with open(f"results/{result_filename}", "wb") as f:
-        f.write(result_bytes)
-    
-    return {"result_url": f"/results/{result_filename}", "scale": scale}
+    # Возвращаем изображение напрямую (без сохранения на диск!)
+    return Response(content=result_bytes, media_type="image/jpeg")
 
 @app.post(
     "/enhance",
@@ -413,11 +405,10 @@ async def enhance_image(
         
         print("=== DEBUG END ===")
         
-        return {
-            "result_url": f"/results/{os.path.basename(final_result_path)}",
-            "postprocess": postprocess,
-            "fidelity_weight": fidelity_weight
-        }
+        with open(final_result_path, "rb") as f:
+            result_bytes = f.read()
+        os.unlink(final_result_path)  
+        return Response(content=result_bytes, media_type="image/jpeg")
 
     finally:
         # Удаляем ТОЛЬКО входной временный файл
@@ -518,13 +509,10 @@ async def postprocess_image(
         
         print("=== POSTPROCESS END ===")
         
-        return {
-            "result_url": f"/results/{os.path.basename(final_result_path)}",
-            "sharpness": sharpness,
-            "contrast": contrast,
-            "brightness": brightness,
-            "denoise": denoise
-        }
+        with open(final_result_path, "rb") as f:
+            result_bytes = f.read()
+        os.unlink(final_result_path)
+        return Response(content=result_bytes, media_type="image/jpeg")
 
     finally:
         # Удаляем ВРЕМЕННЫЕ файлы, но НЕ финальный результат
@@ -540,11 +528,13 @@ async def postprocess_image(
         
         # НЕ удаляем final_result_path здесь!
 
+from fastapi.responses import Response
+
 @app.post(
     "/colorize",
     summary="Раскраска старых фотографий",
-    description="Преобразует чёрно-белые изображения в цветные с правильной обработкой для старых фото",
-    response_description="URL для скачивания раскрашенного изображения"
+    description="Преобразует чёрно-белые изображения в цветные",
+    response_description="Цветное изображение в формате JPEG"
 )
 async def colorize_image(image: UploadFile = File(...)):
     # Валидация
@@ -553,8 +543,7 @@ async def colorize_image(image: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Only JPG/PNG/BMP supported")
 
     input_name = f"upload_{uuid.uuid4().hex}{ext}"
-    final_result_path = None
-
+    
     with open(input_name, "wb") as f:
         f.write(await image.read())
 
@@ -574,30 +563,20 @@ async def colorize_image(image: UploadFile = File(...)):
         # Загружаем модель
         colorizer = siggraph17(pretrained=True).eval()
         
-        # Загружаем изображение и конвертируем в чистый грейскейл
+        # Загружаем изображение и конвертируем в грейскейл
         img = Image.open(input_name).convert('L')
-        
-        # Предобработка для старых фото
         img_array = np.array(img)
         
-        # Улучшение контраста
+        # Предобработка для старых фото
         clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         img_array = clahe.apply(img_array)
-        
-        # Удаление шума
         img_array = cv2.fastNlMeansDenoising(img_array, h=12)
-        
-        # Конвертация в RGB для модели
         img_rgb = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
         
         # Конвертация в Lab
         img_lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2Lab)
         img_l = img_lab[:, :, 0:1].astype(np.float32)
-        
-        # Нормализация L канала к [0, 100]
         img_l_norm = img_l / 100.0
-        
-        # Подготовка для модели
         img_l_rs = torch.from_numpy(img_l_norm).permute(2, 0, 1).float().unsqueeze(0)
         img_l_rs = F.interpolate(img_l_rs, size=(224, 224), mode='bilinear')
         
@@ -606,26 +585,23 @@ async def colorize_image(image: UploadFile = File(...)):
             img_ab = colorizer(img_l_rs)
             img_ab = F.interpolate(img_ab, size=(img_lab.shape[0], img_lab.shape[1]), mode='bilinear')
         
-        # Реконструкция с ПРАВИЛЬНЫМ масштабом
+        # Реконструкция
         img_lab_out = np.zeros_like(img_lab)
         img_lab_out[:, :, 0] = img_l[:, :, 0]
-        img_lab_out[:, :, 1:] = img_ab[0].cpu().permute(1, 2, 0).numpy() * 100.0  # КРИТИЧЕСКИ ВАЖНО: *100
-        
-        # Конвертация в RGB
+        img_lab_out[:, :, 1:] = img_ab[0].cpu().permute(1, 2, 0).numpy() * 100.0
         img_rgb_out = cv2.cvtColor(np.uint8(img_lab_out), cv2.COLOR_Lab2RGB)
         
-        # Смешивание с оригиналом для естественности
+        # Смешивание с оригиналом
         img_original_rgb = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
         colorized = cv2.addWeighted(img_rgb_out, 0.7, img_original_rgb, 0.3, 0)
         
-        # Сохранение
-        final_result_path = f"results/colorized_{uuid.uuid4().hex}.jpg"
-        cv2.imwrite(final_result_path, cv2.cvtColor(colorized, cv2.COLOR_RGB2BGR))
+        # Конвертация в байты
+        is_success, buffer = cv2.imencode(".jpg", cv2.cvtColor(colorized, cv2.COLOR_RGB2BGR))
+        if not is_success:
+            raise RuntimeError("Failed to encode image")
         
-        print(f"✓ Colorized successfully! Saved to: {final_result_path}")
-        print("=== COLORIZE END ===")
-        
-        return {"result_url": f"/results/{os.path.basename(final_result_path)}"}
+        print("=== COLORIZE SUCCESS ===")
+        return Response(content=buffer.tobytes(), media_type="image/jpeg")
 
     except Exception as e:
         print(f"✗ Error colorizing: {e}")
@@ -634,12 +610,9 @@ async def colorize_image(image: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Colorization failed: {str(e)}")
     
     finally:
-        # Очистка временных файлов
+        # Удаляем временный файл
         if os.path.exists(input_name):
-            try:
-                os.unlink(input_name)
-            except:
-                pass
+            os.unlink(input_name)
 
 if __name__ == "__main__":
     print("Сервер запущен! Открой в браузере:")
