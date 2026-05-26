@@ -128,15 +128,16 @@ RUN mkdir -p /root/.cache/realesrgan && \
 
 # Создание пользователя
 RUN useradd --create-home --shell /bin/bash appuser && \
-    mkdir -p /app/results /app/styles /app/temp_content && \
+    mkdir -p /app/results /app/style /app/temp_content && \
     chown -R appuser:appuser /app
 
 USER appuser
 
-# Копирование кода проекта
+# Копирование кода проекта (теперь из подпапки)
 COPY --chown=appuser:appuser . .
 
-COPY --chown=appuser:appuser styles/ ./styles/
+# Копирование стилей (из корня)
+#COPY --chown=appuser:appuser style/ ./style/
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1

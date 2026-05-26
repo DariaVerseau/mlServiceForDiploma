@@ -70,7 +70,7 @@ async def process_style_transfer(
     content_bytes = await image.read()
     
     # Загружаем соответствующее style изображение
-    style_path = f"styles/{style}.jpg"
+    style_path = f"style/{style}.jpg"
     if not os.path.exists(style_path):
         raise HTTPException(
             status_code=400, 
@@ -95,7 +95,7 @@ async def process_style_transfer(
 BASE_DIR = Path(__file__).parent
 ADAIN_DIR = BASE_DIR / "pytorch-AdaIN"
 ADAIN_SCRIPT = ADAIN_DIR / "test.py"
-STYLE_DIR = ADAIN_DIR / "input" / "style"
+#STYLE_DIR = BASE_DIR.parent / "style"
 MODELS_DIR = ADAIN_DIR / "models"
 RESULTS_DIR = BASE_DIR / "results"
 TEMP_DIR = BASE_DIR / "temp_content"
@@ -111,12 +111,11 @@ app.mount("/results", StaticFiles(directory=str(RESULTS_DIR)), name="results")
 decoder_weights = MODELS_DIR / "decoder.pth"
 vgg_weights = MODELS_DIR / "vgg_normalised.pth"
 
-
 @app.post(
     "/style_transfer_adain",
     summary="Применить художественный стиль к изображению",
     description="Использует AdaIN из официального репозитория pytorch-AdaIN",
-    response_description="URL для скачивания результата"
+    response_description="Обработанное изображение в формате JPEG"
 )
 async def style_transfer_adain(
     image: UploadFile = File(..., description="Изображение для стилизации"),
@@ -126,121 +125,82 @@ async def style_transfer_adain(
 ):
     """Перенос художественного стиля через вызов test.py из репозитория"""
     
-    # === 1. Валидация стиля ===
-    supported_styles = [
-        "vangogh", "picasso", "monet", "monet2", "erinHanson",
-        "antimonocromatismo", "asheville", "brushstrokes", "contrast_of_forms",
-        "en_campo_gris", "goeritz", "impronte_d_artista", "la_muse",
-        "mondrian_cropped", "picasso_seated_nude_hr", "picasso_self_portrait",
-        "scene_de_rue", "sketch", "the_resevoir_at_poitiers", "trial",
-        "woman_in_peasant_dress_cropped", "woman_in_peasant_dress",
-        "woman_with_hat_matisse"
-    ]
-    
+    # === ЕДИНЫЙ ПУТЬ К СТИЛЯМ ===
+    STYLES_DIR = Path("style")
+
+    if not STYLES_DIR.exists():
+        raise HTTPException(500, f"Styles directory not found: {STYLES_DIR}")
+
+    # Автоматическое определение поддерживаемых стилей
+    supported_styles = {
+        f.stem: f 
+        for f in STYLES_DIR.iterdir() 
+        if f.suffix.lower() in ('.jpg', '.png') and f.is_file()
+    }
+
     if style not in supported_styles:
-        raise HTTPException(400, f"Style '{style}' not supported")
-    
-    # === 2. Проверяем наличие файла стиля ===
-    style_path = STYLE_DIR / f"{style}.jpg"
-    if not style_path.exists():
-        style_path = STYLE_DIR / f"{style}.png"
-        if not style_path.exists():
-            raise HTTPException(404, f"Style image '{style}' not found")
-    
-    # === 3. Проверяем наличие весов ===
+        available = ", ".join(supported_styles.keys())
+        raise HTTPException(400, f"Style '{style}' not supported. Available: {available}")
+
+    style_path = supported_styles[style]  # ← файл точно существует
+
+    # === Проверяем наличие весов ===
     if not decoder_weights.exists():
         raise HTTPException(500, f"Decoder weights not found at {decoder_weights}")
     if not vgg_weights.exists():
         raise HTTPException(500, f"VGG weights not found at {vgg_weights}")
-    
-    # === 4. Сохраняем загруженное изображение ===
+
+    # === Обработка изображения ===
     content_bytes = await image.read()
     if len(content_bytes) == 0:
         raise HTTPException(400, "Empty image file")
-    
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False, dir=TEMP_DIR) as tmp:
+
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
         tmp.write(content_bytes)
         content_path = tmp.name
-    
-    # === 5. Временный файл для результата (с именем, которое создаст test.py) ===
-    # test.py создаёт файлы вида: {content_name}_stylized_{style_name}.jpg
-    # Мы сохраним во временную папку, а потом переименуем
-    temp_output_dir = TEMP_DIR / "adain_output"
-    temp_output_dir.mkdir(exist_ok=True)
-    
-    # === 6. Вызываем test.py ===
-    command = [
-        "python", str(ADAIN_SCRIPT),
-        "--content", content_path,
-        "--style", str(style_path),
-        "--output", str(temp_output_dir),  # Сохраняем во временную папку
-        "--alpha", str(alpha),
-        "--decoder", str(decoder_weights),
-        "--vgg", str(vgg_weights),
-    ]
-    
-    if preserve_color:
-        command.append("--preserve_color")
-    
-    print(f"Running: {' '.join(command)}")
-    
+
     try:
-        # Запускаем процесс
-        result = subprocess.run(
-            command,
-            cwd=str(ADAIN_DIR),
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False
-        )
-        
-        if result.returncode != 0:
-            print(f"STDERR: {result.stderr}")
-            raise RuntimeError(f"AdaIN failed: {result.stderr}")
-        
-        # === 7. Находим созданный файл ===
-        # test.py создаёт файл с именем: {basename}_stylized_{stylename}.jpg
-        content_basename = Path(content_path).stem
-        style_basename = style_path.stem
-        expected_filename = f"{content_basename}_stylized_{style_basename}.jpg"
-        temp_result_path = temp_output_dir / expected_filename
-        
-        # Если файл не найден, ищем любой jpg во временной папке
-        if not temp_result_path.exists():
-            jpg_files = list(temp_output_dir.glob("*.jpg"))
-            if jpg_files:
-                temp_result_path = jpg_files[0]
-            else:
-                raise RuntimeError("No output file found")
-        
-        print(f"Found temp result: {temp_result_path}")
-        
-        # === 8. Переименовываем в нужное имя ===
-        final_filename = f"adain_{style}_{uuid.uuid4().hex}.jpg"
-        final_path = RESULTS_DIR / final_filename
-        
-        shutil.move(str(temp_result_path), str(final_path))
-        print(f"Moved to: {final_path}")
-        
+        with tempfile.TemporaryDirectory() as temp_output_dir:
+            command = [
+                "python", str(ADAIN_SCRIPT),
+                "--content", content_path,
+                "--style", str(style_path.resolve()),
+                "--output", temp_output_dir,
+                "--alpha", str(alpha),
+                "--decoder", str(decoder_weights),
+                "--vgg", str(vgg_weights),
+            ]
+            if preserve_color:
+                command.append("--preserve_color")
+
+            result = subprocess.run(
+                command,
+                cwd=str(ADAIN_DIR),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False
+            )
+
+            if result.returncode != 0:
+                raise RuntimeError(f"AdaIN failed: {result.stderr}")
+
+            output_files = list(Path(temp_output_dir).glob("*.jpg"))
+            if not output_files:
+                raise RuntimeError("No output file generated")
+
+            with open(output_files[0], "rb") as f:
+                result_bytes = f.read()
+
+        return Response(content=result_bytes, media_type="image/jpeg")
+
     except subprocess.TimeoutExpired:
         raise HTTPException(500, "Style transfer timeout (120 seconds)")
     except Exception as e:
-        print(f"Error: {e}")
         raise HTTPException(500, f"Style transfer failed: {str(e)}")
     finally:
-        # Удаляем временные файлы
         if os.path.exists(content_path):
             os.unlink(content_path)
-        # Очищаем временную папку с результатами
-        if temp_output_dir.exists():
-            shutil.rmtree(temp_output_dir, ignore_errors=True)
-    
-   # После shutil.move(...):
-    with open(final_path, "rb") as f:
-        result_bytes = f.read()
-    os.unlink(final_path)  
-    return Response(content=result_bytes, media_type="image/jpeg")
 
 @app.get("/results/{filename}")
 async def get_result(filename: str):
@@ -446,11 +406,11 @@ async def postprocess_image(
     if not (0.0 <= brightness <= 2.0):
         raise HTTPException(status_code=400, detail="brightness must be 0.0–2.0")
     
-    ext = os.path.splitext(image.filename)[1].lower()
+    """ext = os.path.splitext(image.filename)[1].lower()
     if ext not in [".jpg", ".jpeg", ".png"]:
-        raise HTTPException(status_code=400, detail="Only JPG/PNG supported")
+        raise HTTPException(status_code=400, detail="Only JPG/PNG supported")"""
 
-    input_name = f"upload_{uuid.uuid4().hex}{ext}"
+    input_name = f"upload_{uuid.uuid4().hex}.jpg"
     final_result_path = None
 
     with open(input_name, "wb") as f:
@@ -530,7 +490,7 @@ async def postprocess_image(
 
 from fastapi.responses import Response
 
-@app.post(
+"""@app.post(
     "/colorize",
     summary="Раскраска старых фотографий",
     description="Преобразует чёрно-белые изображения в цветные",
@@ -613,6 +573,7 @@ async def colorize_image(image: UploadFile = File(...)):
         # Удаляем временный файл
         if os.path.exists(input_name):
             os.unlink(input_name)
+ """
 
 if __name__ == "__main__":
     print("Сервер запущен! Открой в браузере:")

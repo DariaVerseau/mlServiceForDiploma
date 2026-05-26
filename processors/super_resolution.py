@@ -59,10 +59,10 @@ def get_upscaler(scale: int):
             scale=scale,
             model_path=model_path,
             model=model,
-            tile=170,  # оптимально для GTX 1650
-            tile_pad=10,
+            tile=256,        # ← попробуйте 256 или 512
+            tile_pad=32,     # ← увеличьте с 10 до 32
             pre_pad=0,
-            half=False,  # GTX 1650 не поддерживает fp16
+            half=False,
             device=device
         )
         _models[scale] = upsampler
@@ -70,22 +70,32 @@ def get_upscaler(scale: int):
     
     return _models[scale]
 
+
+# Загрузка изображения
 def upscale_image(image_bytes: bytes, scale: int = 4) -> bytes:
-    # Загрузка изображения
+    # Открываем и сразу конвертируем в RGB
     img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-    img_array = np.array(img)
     
-    print(f"Processing image of size: {img_array.shape}, scale: {scale}x")
+    # Принудительно удаляем EXIF и цветовые профили
+    img = img.copy()  # Создаём "чистую" копию без метаданных
+    
+    # Преобразуем в numpy и проверяем диапазон
+    img_array = np.array(img)
+    if img_array.dtype != np.uint8:
+        img_array = img_array.astype(np.uint8)
+    if img_array.min() < 0 or img_array.max() > 255:
+        # Нормализуем, если значения вне [0,255]
+        img_array = np.clip(img_array, 0, 255).astype(np.uint8)
 
-    # Выбор модели
+    print(f"Input shape: {img_array.shape}, dtype: {img_array.dtype}")
+
     upsampler = get_upscaler(scale)
-
-    # Обработка
     output, _ = upsampler.enhance(img_array, outscale=scale)
 
-    # Конвертация обратно в байты
-    output_img = Image.fromarray(output)
-    output_bytes = io.BytesIO()
-    output_img.save(output_bytes, format='JPEG', quality=95)
-    output_bytes.seek(0)
-    return output_bytes.getvalue()
+    # Убедимся, что выход корректен
+    output = np.clip(output, 0, 255).astype(np.uint8)
+    output_img = Image.fromarray(output, mode='RGB')
+
+    buf = io.BytesIO()
+    output_img.save(buf, format='JPEG', quality=95, optimize=True)
+    return buf.getvalue()
