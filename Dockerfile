@@ -28,7 +28,7 @@ RUN pip install --no-cache-dir \
 # Это критически важно: basicsr.data.degradations есть только в репозитории
 RUN git clone https://github.com/xinntao/BasicSR.git && \
     cd BasicSR && \
-    pip install --no-cache-dir -r requirements.txt && \
+    pip install --default-timeout=1000 --no-cache-dir -r requirements.txt && \
     python setup.py develop
 
 # ===== 3. Real-ESRGAN (использует basicsr из репозитория) =====

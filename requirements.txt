@@ -13,3 +13,5 @@ numpy==1.26.4
 
 # Только если используете scikit-image в postprocess
 scikit-image==0.26.0
+
+cython 
