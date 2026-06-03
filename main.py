@@ -10,12 +10,9 @@ import uvicorn
 import os
 from PIL import Image, ImageEnhance
 
-#from processors.face_enhancement import enhance_faces первая модель, неплохая, но плохо справлятся с обработкой глаз, делает их не естественными  
-#from processors.codeformer_enhancement import enhance_faces_codeformer #улучшенная модель 
 from basic_style_transfer import process_image #пока использую базовый перенос стиля 
 from processors.super_resolution import upscale_image
 from processors.postprocess import enhance_photo_pil_cv2
-
 
 import uuid
 import sys
@@ -95,7 +92,7 @@ async def process_style_transfer(
 BASE_DIR = Path(__file__).parent
 ADAIN_DIR = BASE_DIR / "pytorch-AdaIN"
 ADAIN_SCRIPT = ADAIN_DIR / "test.py"
-#STYLE_DIR = BASE_DIR.parent / "style"
+
 MODELS_DIR = ADAIN_DIR / "models"
 RESULTS_DIR = BASE_DIR / "results"
 TEMP_DIR = BASE_DIR / "temp_content"
@@ -142,7 +139,7 @@ async def style_transfer_adain(
         available = ", ".join(supported_styles.keys())
         raise HTTPException(400, f"Style '{style}' not supported. Available: {available}")
 
-    style_path = supported_styles[style]  # ← файл точно существует
+    style_path = supported_styles[style]  
 
     # === Проверяем наличие весов ===
     if not decoder_weights.exists():
@@ -490,148 +487,6 @@ async def enhance_image(
             except Exception as e:
                 print(f"Failed to delete input file: {e}")
 
-"""@app.post(
-    "/enhance"
-)
-async def enhance_image(
-    image: UploadFile = File(...),
-    fidelity_weight: float = Form(0.7),  # изменено с 0.6 на 0.7
-    postprocess: bool = Form(True)
-):
-    # Валидация
-    if not (0.0 <= fidelity_weight <= 1.0):
-        raise HTTPException(status_code=400, detail="fidelity_weight must be 0.0–1.0")
-    
-    # Получаем расширение
-    ext = os.path.splitext(image.filename)[1].lower()
-
-    # Если расширение не поддерживается или пустое, используем .jpg
-    if ext not in [".jpg", ".jpeg", ".png"]:
-        ext = ".jpg"
-
-    # Создаём имя файла
-    input_name = f"upload_{uuid.uuid4().hex}{ext}"
-    final_result_path = None
-
-    with open(input_name, "wb") as f:
-        f.write(await image.read())
-
-    try:
-        print("=== DEBUG START ===")
-        print(f"Input file: {input_name}")
-        print(f"fidelity_weight: {fidelity_weight}")
-        print(f"postprocess: {postprocess}")
-        
-        # === УМЕНЬШАЕМ ВХОД ДО CODEFORMER ===
-        max_input_width = 1000
-        with Image.open(input_name) as img_orig:
-            if img_orig.width > max_input_width:
-                ratio = max_input_width / img_orig.width
-                new_size = (max_input_width, int(img_orig.height * ratio))
-                img_orig = img_orig.resize(new_size, Image.LANCZOS)
-                img_orig.save(input_name)
-                print(f"Input resized BEFORE CodeFormer: {img_orig.size}")
-        
-        # === ЗАПУСК CODEFORMER С ОПТИМАЛЬНЫМИ ПАРАМЕТРАМИ ===
-        cmd = [
-            sys.executable,
-            "CodeFormer/inference_codeformer.py",
-            "--input_path", input_name,
-            "-w", str(fidelity_weight),
-            "--bg_upsampler", "realesrgan",  # ← ИЗМЕНЕНО с "None" на "realesrgan"
-            "--face_upsample"                 # ← ДОБАВЛЕНО
-        ]
-        result = subprocess.run(cmd, cwd=".", capture_output=True, text=True, timeout=600)
-        
-        print(f"CodeFormer return code: {result.returncode}")
-        if result.returncode != 0:
-            print("CodeFormer ERROR:", result.stderr)
-            print("CodeFormer STDOUT:", result.stdout)
-        
-        # === ПОИСК РЕЗУЛЬТАТА В ПРАВИЛЬНОЙ ПАПКЕ ===
-        img_path = input_name  # fallback: исходное изображение
-
-        # Ищем в папке: results/test_img_{fidelity_weight}/final_results/
-        expected_dir = f"results/test_img_{fidelity_weight}/final_results"
-        print(f"Looking for results in: {expected_dir}")
-        print(f"Directory exists: {os.path.exists(expected_dir)}")
-
-        if os.path.exists(expected_dir):
-            files_in_final = [
-                f for f in os.listdir(expected_dir)
-                if os.path.isfile(os.path.join(expected_dir, f))
-            ]
-            print(f"Files found: {files_in_final}")
-            
-            if files_in_final:
-                # Берём самый свежий файл
-                latest_file = max(
-                    files_in_final,
-                    key=lambda f: os.path.getctime(os.path.join(expected_dir, f))
-                )
-                img_path = os.path.join(expected_dir, latest_file)
-                print(f"✓ Using CodeFormer result: {img_path}")
-            else:
-                print("✗ No files in final_results/ - using input")
-        else:
-            print("✗ Expected directory not found - using input")
-        
-        # === ПОСТОБРАБОТКА ===
-        print(f"Opening image from: {img_path}")
-        
-        with Image.open(img_path) as img:
-            print(f"Image mode: {img.mode}, size: {img.size}")
-            
-            # Ограничиваем максимальную ширину до 2000 пикселей
-            max_width = 2000
-            if img.width > max_width:
-                ratio = max_width / img.width
-                new_size = (max_width, int(img.height * ratio))
-                img = img.resize(new_size, Image.LANCZOS)
-                print(f"Resized to: {img.size}")
-            
-            # Конвертируем в RGB если нужно
-            if img.mode in ("RGBA", "P"):
-                img = img.convert("RGB")
-            
-            # Применяем постобработку если включена
-            if postprocess:
-                print(">>> APPLYING POSTPROCESSING <<<")
-                img = enhance_photo_pil_cv2(img)
-                print("Postprocessing applied!")
-            else:
-                print(">>> SKIPPING POSTPROCESSING <<<")
-            
-            # Сохраняем в компактный JPEG
-            postfix = f"_postprocess_w{fidelity_weight}" if postprocess else f"_w{fidelity_weight}"
-            final_result_path = f"results/enhanced{postfix}_{uuid.uuid4().hex}.jpg"
-            quality = 90 if postprocess else 95
-            img.save(final_result_path, "JPEG", quality=quality, optimize=True)
-            print(f"Saved to: {final_result_path}")
-        
-        print("=== DEBUG END ===")
-        
-        with open(final_result_path, "rb") as f:
-            result_bytes = f.read()
-        os.unlink(final_result_path)  
-        return Response(content=result_bytes, media_type="image/jpeg")
-
-    except Exception as e:
-        print(f"Exception in enhance_image: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
-
-    finally:
-        # Удаляем ТОЛЬКО входной временный файл
-        if input_name and os.path.exists(input_name):
-            try:
-                os.unlink(input_name)
-                print(f"Deleted input file: {input_name}")
-            except Exception as e:
-                print(f"Failed to delete input file: {e}")
-  """  
-
 @app.post(
     "/postprocess",
     summary="Классическая постобработка изображения",
@@ -742,94 +597,8 @@ async def postprocess_image(
             except:
                 pass
         
-        # НЕ удаляем final_result_path здесь!
 
 from fastapi.responses import Response
-
-"""@app.post(
-    "/colorize",
-    summary="Раскраска старых фотографий",
-    description="Преобразует чёрно-белые изображения в цветные",
-    response_description="Цветное изображение в формате JPEG"
-)
-async def colorize_image(image: UploadFile = File(...)):
-    # Валидация
-    ext = os.path.splitext(image.filename)[1].lower()
-    if ext not in [".jpg", ".jpeg", ".png", ".bmp"]:
-        raise HTTPException(status_code=400, detail="Only JPG/PNG/BMP supported")
-
-    input_name = f"upload_{uuid.uuid4().hex}{ext}"
-    
-    with open(input_name, "wb") as f:
-        f.write(await image.read())
-
-    try:
-        print("=== COLORIZE START ===")
-        
-        # Импорты
-        import sys
-        sys.path.append('./colorization')
-        from colorizers import siggraph17
-        import torch
-        import torch.nn.functional as F
-        from PIL import Image
-        import numpy as np
-        import cv2
-        
-        # Загружаем модель
-        colorizer = siggraph17(pretrained=True).eval()
-        
-        # Загружаем изображение и конвертируем в грейскейл
-        img = Image.open(input_name).convert('L')
-        img_array = np.array(img)
-        
-        # Предобработка для старых фото
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-        img_array = clahe.apply(img_array)
-        img_array = cv2.fastNlMeansDenoising(img_array, h=12)
-        img_rgb = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
-        
-        # Конвертация в Lab
-        img_lab = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2Lab)
-        img_l = img_lab[:, :, 0:1].astype(np.float32)
-        img_l_norm = img_l / 100.0
-        img_l_rs = torch.from_numpy(img_l_norm).permute(2, 0, 1).float().unsqueeze(0)
-        img_l_rs = F.interpolate(img_l_rs, size=(224, 224), mode='bilinear')
-        
-        # Цветизация
-        with torch.no_grad():
-            img_ab = colorizer(img_l_rs)
-            img_ab = F.interpolate(img_ab, size=(img_lab.shape[0], img_lab.shape[1]), mode='bilinear')
-        
-        # Реконструкция
-        img_lab_out = np.zeros_like(img_lab)
-        img_lab_out[:, :, 0] = img_l[:, :, 0]
-        img_lab_out[:, :, 1:] = img_ab[0].cpu().permute(1, 2, 0).numpy() * 100.0
-        img_rgb_out = cv2.cvtColor(np.uint8(img_lab_out), cv2.COLOR_Lab2RGB)
-        
-        # Смешивание с оригиналом
-        img_original_rgb = cv2.cvtColor(img_array, cv2.COLOR_GRAY2RGB)
-        colorized = cv2.addWeighted(img_rgb_out, 0.7, img_original_rgb, 0.3, 0)
-        
-        # Конвертация в байты
-        is_success, buffer = cv2.imencode(".jpg", cv2.cvtColor(colorized, cv2.COLOR_RGB2BGR))
-        if not is_success:
-            raise RuntimeError("Failed to encode image")
-        
-        print("=== COLORIZE SUCCESS ===")
-        return Response(content=buffer.tobytes(), media_type="image/jpeg")
-
-    except Exception as e:
-        print(f"✗ Error colorizing: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Colorization failed: {str(e)}")
-    
-    finally:
-        # Удаляем временный файл
-        if os.path.exists(input_name):
-            os.unlink(input_name)
- """
 
 if __name__ == "__main__":
     print("Сервер запущен! Открой в браузере:")
